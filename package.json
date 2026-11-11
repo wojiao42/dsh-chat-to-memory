@@ -1,0 +1,39 @@
+{
+  "name": "dsh-chatgpt-to-memory",
+  "version": "0.1.0",
+  "private": false,
+  "description": "Distills your official ChatGPT data export into durable memory candidates for DeepSeek Harness: downloads the export (with re-auth via Gmail code), dedupes against previous imports, and writes candidate facts / interests / viewpoints under profile/inbox for the dsh-long-term-memory plugin to merge. Never writes memory files itself; never uploads anything.",
+  "type": "module",
+  "license": "MIT",
+  "keywords": [
+    "dsh-plugin",
+    "deepseek-harness",
+    "dsh",
+    "cordis",
+    "memory",
+    "chatgpt",
+    "export",
+    "distill"
+  ],
+  "exports": {
+    ".": "./index.js"
+  },
+  "files": [
+    "index.js",
+    "lib",
+    "cordis.patch.yml",
+    "README.md",
+    "README.en.md",
+    "DESIGN.md",
+    "LICENSE"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/wojiao42/dsh-chatgpt-to-memory.git"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  }
+}

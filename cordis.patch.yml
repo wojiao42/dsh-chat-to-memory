@@ -1,0 +1,3 @@
+- insert:
+    - id: chatgpt-to-memory
+      name: 'dsh-chatgpt-to-memory'
