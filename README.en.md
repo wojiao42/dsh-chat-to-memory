@@ -1,6 +1,6 @@
 # dsh-chatgpt-to-memory
 
-> Distills your official **ChatGPT data export** into memory candidates for DeepSeek Harness, then hands them to [`dsh-long-term-memory`](https://github.com/wojiao42/dsh-long-term-memory) to merge.
+> Turns your official **ChatGPT data export** into memory candidates for DeepSeek Harness: scans the export, dedupes against previous imports, writes a distillation dataset and audit report, then hands candidates to [`dsh-long-term-memory`](https://github.com/wojiao42/dsh-long-term-memory). The export/download scripts still live in a companion workspace (already proven) and move into this plugin in M2.
 >
 > **This plugin never writes memory files.** The only write path is `memory_import_candidates` in `dsh-long-term-memory`.
 

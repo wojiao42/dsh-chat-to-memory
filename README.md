@@ -1,6 +1,6 @@
 # dsh-chatgpt-to-memory
 
-> 把 ChatGPT 官方导出**蒸馏成记忆候选**的 DeepSeek Harness 插件：触发导出 → 下载 → 去重 → 出数据集与候选，交给 [`dsh-long-term-memory`](https://github.com/wojiao42/dsh-long-term-memory) 落库。
+> 把 ChatGPT 官方导出**蒸馏成记忆候选**的 DeepSeek Harness 插件：扫描导出包 → 按历史去重 → 产出待蒸馏数据集与审计报告 → 候选交给 [`dsh-long-term-memory`](https://github.com/wojiao42/dsh-long-term-memory) 落库。导出/下载脚本目前在配套工作区（已跑通），M2 迁入本插件。
 >
 > **本插件不写记忆文件**；写入记忆的唯一通道是 `dsh-long-term-memory` 的 `memory_import_candidates`。
 
