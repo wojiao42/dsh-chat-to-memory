@@ -71,7 +71,7 @@ node smoke.mjs
 
 ## 收录状态
 
-待发布后提交 awesome-dsh-plugin / dsh-plugin.org。
+待维护者合并：[awesome-dsh-plugin #17270](https://github.com/awesome-dsh-plugin/awesome-dsh-plugin/pull/17270)（1 个文件，CI 中）。`dsh-plugin.org` 的条目从该目录同步。
 
 ## 许可
 
