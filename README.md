@@ -1,77 +1,80 @@
 # dsh-chatgpt-to-memory
 
-> 把 ChatGPT 官方导出**蒸馏成记忆候选**的 DeepSeek Harness 插件：扫描导出包 → 按历史去重 → 产出待蒸馏数据集与审计报告 → 候选交给 [`dsh-long-term-memory`](https://github.com/wojiao42/dsh-long-term-memory) 落库。导出/下载脚本目前在配套工作区（已跑通），M2 迁入本插件。
+> ChatGPT 官方导出 → 记忆，一条链全在插件里：**触发导出 → 等邮件 → 下载解压 → 扫描去重 → LLM 蒸馏 → 合并进记忆**。
 >
-> **本插件不写记忆文件**；写入记忆的唯一通道是 `dsh-long-term-memory` 的 `memory_import_candidates`。
+> 不写记忆文件：落库只经过 [`dsh-long-term-memory`](https://github.com/wojiao42/dsh-long-term-memory) 的 `memory_import_candidates`。
 
-**状态：M1 开发中**（扫描/去重/数据集/配置已可用；导出下载部分仍是工作区脚本，M2 迁入）。
+**状态：v0.2.0 完整链路**（面板/定时任务只需调用 `import_run`）。
 
 ---
 
 ## 快速上手
 
 ```powershell
-# 1) 安装（M1 阶段先用本地目录）
-dsh plugin --profile desktop add link:D:/dsh-plugins/dsh-chatgpt-to-memory
+# 1) 安装（桌面端：插件页 → 添加插件 → 选本地目录；或命令行）
+dsh plugin --profile desktop add github:wojiao42/dsh-chatgpt-to-memory
 
-# 2) 重启 DSH 后，在会话里：
-#    import_status      看导出目录/配置/上次扫描
-#    import_configure   读写蒸馏取向配置
-#    import_scan        扫描最新导出，统计新增会话并产出数据集
+# 2) 重启 DSH 后，在会话里直接说：
+#    「跑一次 ChatGPT 记忆导入」
+#    agent 会调用 import_run：导出→下载→扫描→蒸馏→合并，并汇报结果。
 ```
 
-## 功能
+## 功能（工具）
 
 | 工具 | 作用 |
 |---|---|
-| `import_status` | 只读：导出根目录、最新导出包、候选文件、上次扫描报告、配置 |
-| `import_configure` | `get` / `set` 蒸馏取向（`profile/distill-config.json`，写前备份） |
-| `import_scan` | **核心**：扫描最新导出 → 按会话 id + 消息文本去重 → 统计新增 → 写数据集与报告 |
-| `import_preview` | 同 scan，但面向"看质量/数量"，并在结果里给出蒸馏要求 |
-| `import_run` | M1 占位：完整链路（导出→下载→重新认证）待 M2 迁入 |
-
-数据集落点：`<cwd>/profile/import-runs/<时间戳>/dataset.json` + `report.json`。
+| `import_run` | **完整链路**：触发/检查导出 → 下载解压 → 扫描去重 → LLM 蒸馏 → 合并记忆；无新导出或新会话时自动跳过 |
+| `import_status` | 只读：导出目录、最新包、候选、上次扫描报告、配置 |
+| `import_scan` | 只扫描去重，产出待蒸馏数据集（不调模型） |
+| `import_distill` | 只对已有数据集做 LLM 蒸馏（可顺带合并） |
+| `import_configure` | 读写配置（provider/model、批次大小、是否自动合并等） |
 
 ## 口径与安全设计
 
-- **只读用户自己的数据**：导出目录（默认 `D:\ChatGPT-Backups`）与工作区 `profile/`。
-- **不写记忆文件**：候选由 agent 蒸馏后写到 `profile/inbox/candidates-*.json`，由 `dsh-long-term-memory` 消费。
-- **不联网**（M1）：本插件自身不发网络请求；M2 的网络只发生在用户自己的 Chrome profile 里，代理跟随用户环境。
-- **不执行命令**（M1）：不 spawn 子进程。
-- **去重三层**（本插件做前两层）：会话级（conversation id）→ 消息级（文本归一化精确匹配）→ 事实级（消费端再做）。
-- **蒸馏硬规则**：只把 `role=user` 当事实来源；禁止职业推断；禁止从问句反推持有；AI 回复仅作上下文。
+- **只碰自有数据**：导出目录（默认 `D:\ChatGPT-Backups`）与工作区 `profile/`。
+- **不写记忆文件**：候选交给 `dsh-long-term-memory` 落库（唯一写入通道）。
+- **网络只在你的 Chrome 登录态里**：导出/下载沿用已跑通的 `weekly.mjs`（邮箱验证码自动重新认证、代理跟随你的环境）。
+- **蒸馏规则**：只把 `role=user` 当事实来源、禁止职业推断、禁止从问句反推持有、AI 回复不作事实；敏感内容（孩子健康/家庭/财务）标 `private` 只进详细版。
+- **可审计**：每次导入写 `profile/import-runs/<时间戳>/`（数据集、报告），已处理会话记在 `processed-conversations.json`，不重复导入。
 
-## 安装
+## 配置
 
-1. 图形界面（桌面端推荐）：设置 → 插件市场 → 自定义安装 → 填 `github:wojiao42/dsh-chatgpt-to-memory`
-2. 命令行：`dsh plugin --profile web add github:wojiao42/dsh-chatgpt-to-memory`
-3. 本地源码开发：`dsh plugin --profile desktop add link:D:/dsh-plugins/dsh-chatgpt-to-memory`
+插件 `config`（profile patch 里给 `- id: chatgpt-to-memory` 加 `config`）：
+
+```yaml
+- id: chatgpt-to-memory
+  config:
+    exportRoot: D:\ChatGPT-Backups
+    workdir: D:\deepseek workspace
+    autoMerge: true
+    distill:
+      provider: deepseek-official
+      model: ''        # 空 = 用该 provider 的第一个模型
+      batchConvs: 20
+```
 
 ## 自测
 
 ```powershell
 node --check index.js
-node smoke.mjs
+node smoke.mjs      # 19 项：静态边界 / 工具注册 / 扫描去重 / 蒸馏 / 合并降级 / 输出解析
 ```
-
-## 兼容
-
-- DSH `0.2.2-rc.1` 验证中。
-- 依赖宿主提供 `@deepseek-ai/dsh-tools`；M2 接入浏览器时再加 `playwright-core`（可选安装）。
 
 ## 已知边界
 
-- M1 不含导出触发/下载/邮件轮询：这部分仍在 `D:\deepseek workspace\automation\chatgpt-export`（已实测跑通）。
-- 旧会话里的"新增消息"本阶段整段跳过（保守策略），后续按需要放开。
-- 附件（`.dat`）不解析。
+- 导出/下载依赖 `weekly.mjs`（随插件一起发布）与 Playwright + 你的 Chrome 登录态；本机首次需 `pnpm install` 拉 `playwright-core`。
+- 蒸馏质量取决于模型；低置信/敏感条目按记忆插件的规则进待审或详细版。
+- 附件（`.dat`）不解析内容。
 
 ## 版本
 
-- **v0.1.0**（2026-11-11）：M1 骨架 —— `import_status` / `import_configure` / `import_scan` / `import_preview`；扫描+两层去重+数据集+报告；`import_run` 占位。
+- **v0.2.0**（2026-11-20）：完整链路进插件——`import_run` 内部完成导出/下载/扫描/蒸馏/合并；新增 `import_distill`；新增已处理会话游标防重复导入。
+- **v0.1.0**：M1 扫描去重 + 数据集 + 配置。
 
 ## 收录状态
 
-待维护者合并：[awesome-dsh-plugin #17270](https://github.com/awesome-dsh-plugin/awesome-dsh-plugin/pull/17270)（1 个文件，CI 中）。`dsh-plugin.org` 的条目从该目录同步。
+- 待维护者合并：[awesome-dsh-plugin #17270](https://github.com/awesome-dsh-plugin/awesome-dsh-plugin/pull/17270)
+- `dsh-plugin.org` 条目从该清单同步。
 
 ## 许可
 

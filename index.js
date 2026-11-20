@@ -1,16 +1,17 @@
 /**
- * dsh-chatgpt-to-memory — 把 ChatGPT 官方导出包蒸馏成「记忆候选」，交给 dsh-long-term-memory 落库。
+ * dsh-chatgpt-to-memory — 把 ChatGPT 官方导出变成记忆，并交给 dsh-long-term-memory 落库。
  *
- * 设计约束（对外宣称，逐条可核对）：
- *   1. 不写记忆文件。本插件只写 <cwd>/profile/import-runs/（数据集、审计）与
- *      <cwd>/profile/distill-config.json（配置）；候选由 agent 蒸馏后写到
- *      <cwd>/profile/inbox/candidates-*.json，由 dsh-long-term-memory 的
- *      memory_import_candidates 消费。写入记忆的唯一通道在那个插件里。
+ * v0.2.0 起是**完整链路插件**（不再依赖工作区脚本或定时任务提示词）：
+ *   导出触发/等邮件/下载/解压（spawn 自带 weekly.mjs；登录态与代理跟随用户环境）
+ *   → 扫描去重（会话 id + 文本归一化）
+ *   → LLM 蒸馏（ctx.llm.stream，事实/兴趣/观点 + 置信度/敏感度）
+ *   → 合并落库（调用 dsh-long-term-memory 的 memory_import_candidates，单一写入通道）
+ *
+ * 边界：
+ *   1. 不直接写记忆文件；写入只经过 dsh-long-term-memory 的工具。
  *   2. 只读写用户自己的数据：导出目录（默认 D:\ChatGPT-Backups）与工作区 profile/。
- *   3. 不联网（M1）：本插件自身不发任何网络请求；M2 的网络只发生在用户自己的 Chrome profile。
- *   4. 不执行命令（M1）：不 spawn 子进程。
- *   5. 去重三层中的前两层在这里实现：会话级（conversation id）+ 消息级（文本归一化精确匹配），
- *      事实级去重留给消费端。
+ *   3. 网络只发生在用户自己的 Chrome 登录态里；代理跟随用户环境，不写死。
+ *   4. 会 spawn 自己的脚本（weekly.mjs）与读取 profile 里的记忆插件，不执行其它命令。
  */
 import {
   copyFileSync,
@@ -21,8 +22,14 @@ import {
   statSync,
   writeFileSync,
 } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { defineTool } from '@deepseek-ai/dsh-tools';
+import { runWeekly } from './lib/export-run.mjs';
+import { distillDataset } from './lib/distill.mjs';
+import { mergeCandidates } from './lib/merge.mjs';
+
+const PLUGIN_DIR = dirname(fileURLToPath(import.meta.url));
 
 export const name = 'chatgpt-to-memory';
 export const inject = ['tools'];
@@ -188,6 +195,14 @@ export function scan(cwd, opts = {}) {
   }
   const conversations = readConversations(latest.dir);
   const processed = loadProcessed(paths);
+  // 已处理会话表（插件自己记的游标，避免重复导入）：profile/import-runs/processed-conversations.json
+  const extraFile = join(paths.runs, 'processed-conversations.json');
+  let extra = new Set();
+  try {
+    extra = new Set(JSON.parse(readFileSync(extraFile, 'utf8')));
+  } catch {
+    // 没有游标文件就当没有
+  }
 
   const picked = [];
   let userTurns = 0;
@@ -198,9 +213,9 @@ export function scan(cwd, opts = {}) {
     const msgs = userMessages(conv);
     const userMsgs = msgs.filter((m) => m.role === 'user');
     userTurns += userMsgs.length;
-    if (processed.convIds.has(convId)) {
+    if (processed.convIds.has(convId) || extra.has(convId)) {
       alreadyProcessed += userMsgs.length;
-      continue; // M1 保守策略：旧会话整段跳过
+      continue; // 旧会话整段跳过
     }
     const fresh = userMsgs.filter((m) => {
       const n = normalize(m.text);
@@ -249,6 +264,12 @@ export function scan(cwd, opts = {}) {
       )}\n`,
       'utf8',
     );
+    // 记录已处理会话（下次不再重复蒸馏）
+    if (picked.length) {
+      mkdirSync(paths.runs, { recursive: true });
+      const nextExtra = new Set([...extra, ...picked.map((c) => c.convId)]);
+      writeFileSync(extraFile, JSON.stringify([...nextExtra], null, 1), 'utf8');
+    }
   }
   return stats;
 }
@@ -282,6 +303,13 @@ const textOut = (t) => [{ type: 'text', text: t }];
 export function apply(ctx, config = {}) {
   if (!ctx.tools) throw new Error('chatgpt-to-memory: ctx.tools 不可用，工具未注册。');
   const exportRoot = config.exportRoot || DEFAULT_EXPORT_ROOT;
+  const workdir = config.workdir || 'D:\\deepseek workspace';
+  const distillConfig = {
+    provider: config.distill?.provider || 'deepseek-official',
+    model: config.distill?.model || '',
+    batchConvs: Number(config.distill?.batchConvs) || 20,
+  };
+  const autoMerge = config.autoMerge !== false;
   const pathsFor = (agent) => resolvePaths(agent?.session?.header?.cwd || config.cwd, exportRoot);
 
   ctx.tools.register(
@@ -405,23 +433,101 @@ export function apply(ctx, config = {}) {
 
   ctx.tools.register(
     defineTool({
-      name: 'import_run',
-      description:
-        'M1 占位：完整链路（触发导出→等邮件→下载→解压→扫描→蒸馏→候选）尚未接入本插件；现在请用 automation\\chatgpt-export 脚本 + import_scan。',
-      parameters: {},
+      name: 'import_distill',
+      description: '对已有数据集做 LLM 蒸馏（不触发导出）。省略 datasetPath 时取最近一次扫描的数据集；autoMerge 开启时会顺带合并。',
+      parameters: { datasetPath: { type: 'string', description: '可选：dataset.json 路径' } },
       output: {
         schema: { type: 'object', additionalProperties: true, properties: {} },
-        render: (_a, v) => textOut(v.message),
+        render: (_a, v) =>
+          textOut(
+            v.error
+              ? `蒸馏失败：${v.error}`
+              : `蒸馏完成：${v.itemCount} 条候选（${v.batches} 批，跳过 ${v.skippedBatches} 批）\n候选文件：${v.file}` +
+                  (v.merged
+                    ? `\n合并：${v.merged.ok ? `写入 memory ${v.merged.written?.memory ?? '?'} / interests ${v.merged.written?.interests ?? '?'} / profile ${v.merged.written?.profile ?? '?'} · 待审 ${v.merged.pending ?? '?'}` : `未合并（${v.merged.reason || '未知原因'}）`}`
+                    : ''),
+          ),
       },
-      async execute() {
+      async execute(args, exec) {
+        const cwd = exec?.agent?.session?.header?.cwd || workdir;
+        let datasetPath = args.datasetPath;
+        if (!datasetPath) {
+          const paths = resolvePaths(cwd, exportRoot);
+          const { lastRun } = listArtifacts(paths);
+          datasetPath = lastRun ? join(lastRun.dir, 'dataset.json') : '';
+        }
+        if (!datasetPath || !existsSync(datasetPath)) {
+          return { error: '没有可用数据集，请先运行 import_scan' };
+        }
+        const r = await distillDataset(ctx, datasetPath, { workdir: cwd, ...distillConfig });
+        const merged = autoMerge ? await mergeCandidates(cwd, r.file) : null;
+        return { ...r, merged };
+      },
+    }),
+  );
+
+  ctx.tools.register(
+    defineTool({
+      name: 'import_run',
+      description:
+        '完整链路（插件内完成）：触发导出 → 等邮件 → 下载 → 解压 → 扫描去重 → LLM 蒸馏 → 合并记忆。没有新导出或没有新会话时自动跳过，不报错。',
+      parameters: { force: { type: 'boolean', description: '可选：强制触发导出（--force 透传）' } },
+      output: {
+        schema: { type: 'object', additionalProperties: true, properties: {} },
+        render: (_a, v) => {
+          if (v.stage === 'imported') {
+            const w = v.merge?.written || {};
+            return textOut(
+              `导入完成：\n导出：${v.export?.zipName || '?'}（${v.export?.sizeMB || '?'} MB，${v.export?.conversations ?? '?'} 会话）\n` +
+                `新增：${v.scan?.newConversations ?? '?'} 会话 / ${v.scan?.newUserTurns ?? '?'} 原话\n` +
+                `蒸馏：${v.distill?.itemCount ?? '?'} 条候选（跳过 ${v.distill?.skippedBatches ?? 0} 批）\n` +
+                `合并：memory ${w.memory ?? '?'} · interests ${w.interests ?? '?'} · profile ${w.profile ?? '?'} · 待审 ${v.merge?.pending ?? '?'} · 重复 ${v.merge?.duplicates ?? '?'}\n` +
+                `报告：${v.merge?.report || v.candidates || '(未生成)'}`,
+            );
+          }
+          if (v.stage === 'no-new') {
+            return textOut(`本次无新会话（导出 ${v.exportDate || '?'}，已处理 ${v.scan?.alreadyProcessed ?? '?'} 条原话），跳过蒸馏。`);
+          }
+          if (v.error) return textOut(`导入失败（${v.stage}）：${v.error}`);
+          return textOut(
+            `本次窗口不导入：stage=${v.stage}\n${(v.actions || []).map((a) => `· ${a}`).join('\n')}`,
+          );
+        },
+      },
+      async execute(args, exec) {
+        const cwd = exec?.agent?.session?.header?.cwd || workdir;
+        const exp = runWeekly({ pluginDir: PLUGIN_DIR, force: args.force === true });
+        if (!(exp.stage === 'done' || exp.downloaded === true)) {
+          return {
+            ok: exp.ok !== false,
+            stage: exp.stage || 'unknown',
+            actions: exp.actions || [],
+            error: exp.error,
+          };
+        }
+        const s = scan(cwd, { exportRoot, write: true });
+        if (!s.ok) return { ok: false, stage: s.reason || 'scan-failed', error: s.message };
+        const exportInfo = {
+          zipName: (s.exportDir || '').split(/[\\/]/).pop() ? `chatgpt-export-${s.exportDate}.zip` : '?',
+          sizeMB: '',
+          conversations: s.conversations,
+        };
+        if (s.newConversations === 0) {
+          return { ok: true, stage: 'no-new', exportDate: s.exportDate, scan: s, export: exportInfo };
+        }
+        const d = await distillDataset(ctx, s.datasetPath, { workdir: cwd, exportDate: s.exportDate, ...distillConfig });
+        const merged = autoMerge ? await mergeCandidates(cwd, d.file) : null;
         return {
-          ok: false,
-          stage: 'not-implemented',
-          message:
-            'M1：本插件目前只做「扫描 + 去重 + 数据集」。导出/下载/重新认证仍是 automation\\chatgpt-export\\weekly.mjs（已跑通），M2 迁入。\n' +
-            '现在可执行：node "D:\\deepseek workspace\\automation\\chatgpt-export\\weekly.mjs"，然后回来 import_scan。',
+          ok: true,
+          stage: 'imported',
+          export: exportInfo,
+          scan: s,
+          distill: { itemCount: d.itemCount, batches: d.batches, skippedBatches: d.skippedBatches },
+          merge: merged,
+          candidates: d.file,
         };
       },
     }),
   );
 }
+

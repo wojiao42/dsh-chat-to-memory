@@ -1,62 +1,77 @@
 # dsh-chatgpt-to-memory
 
-> Turns your official **ChatGPT data export** into memory candidates for DeepSeek Harness: scans the export, dedupes against previous imports, writes a distillation dataset and audit report, then hands candidates to [`dsh-long-term-memory`](https://github.com/wojiao42/dsh-long-term-memory). The export/download scripts still live in a companion workspace (already proven) and move into this plugin in M2.
+> The complete ChatGPT export → memory pipeline inside a DeepSeek Harness plugin: **trigger export → wait for mail → download & unzip → scan & dedupe → LLM distillation → merge into memory**.
 >
-> **This plugin never writes memory files.** The only write path is `memory_import_candidates` in `dsh-long-term-memory`.
+> It never writes memory files: merging goes only through [`dsh-long-term-memory`](https://github.com/wojiao42/dsh-long-term-memory)'s `memory_import_candidates`.
 
-**Status: M1 in progress** (scan / dedupe / dataset / config available; export+download still live in workspace scripts, moving in M2).
+**Status: v0.2.0 — full pipeline.** A scheduled task or the chat only needs to call `import_run`.
 
-## What it does
+---
 
-| Tool | Purpose |
+## Quick start
+
+```powershell
+# 1) Install (Desktop: Plugins → Add plugin → pick the local folder; or CLI)
+dsh plugin --profile desktop add github:wojiao42/dsh-chatgpt-to-memory
+
+# 2) After restarting DSH, just ask in a session:
+#    "run a ChatGPT memory import"
+#    the agent calls import_run and reports the result.
+```
+
+## Tools
+
+| Tool | What it does |
 |---|---|
-| `import_status` | Read-only status: export root, latest export, candidates, last scan report, config |
-| `import_configure` | Get/set distill preferences (`profile/distill-config.json`, backed up before write) |
-| `import_scan` | Scan latest export → dedupe (conversation id + normalized text) → write dataset + report |
-| `import_preview` | Same as scan, with distillation rules spelled out (quality inspection) |
-| `import_run` | M1 placeholder: full export→download→re-auth chain lands in M2 |
-
-Datasets go to `<cwd>/profile/import-runs/<timestamp>/dataset.json`.
+| `import_run` | **Full pipeline**: trigger/check export → download & unzip → scan & dedupe → LLM distillation → merge; skips automatically when there is no new export or no new conversations |
+| `import_status` | Read-only: export dir, latest archive, candidates, last scan report, config |
+| `import_scan` | Scan & dedupe only; writes a distillation dataset |
+| `import_distill` | Run LLM distillation on an existing dataset (optionally merges) |
+| `import_configure` | Read/write config (provider/model, batch size, auto-merge) |
 
 ## Security & scope
 
-- Reads only your own export dir (`D:\ChatGPT-Backups` by default) and workspace `profile/`.
-- **Never writes memory files**; candidates are produced by the agent and merged by `dsh-long-term-memory`.
-- **No network** in M1; M2 network stays inside your own Chrome profile, proxy follows your environment.
-- **No process spawning** in M1.
-- Dedupe: conversation id → normalized exact text → (in consumer) fact-level.
+- Touches only your own data: the export dir (`D:\ChatGPT-Backups` by default) and the workspace `profile/`.
+- **Never writes memory files**; candidates are merged by `dsh-long-term-memory` (the single write path).
+- Network happens only inside your own Chrome profile via the proven `weekly.mjs` (automatic email-code re-auth; proxy follows your environment).
+- Distillation rules: only `role=user` is a fact source; no profession inference; no assuming a hypothetical question means ownership; assistant text is never a fact.
+- Auditable: every import writes `profile/import-runs/<timestamp>/` and a processed-conversation cursor, so nothing is imported twice.
 
-## Install
+## Configuration
 
-1. GUI (desktop, recommended): Settings → Plugin market → Custom install → `github:wojiao42/dsh-chatgpt-to-memory`
-2. CLI: `dsh plugin --profile web add github:wojiao42/dsh-chatgpt-to-memory`
-3. Local dev: `dsh plugin --profile desktop add link:D:/dsh-plugins/dsh-chatgpt-to-memory`
+```yaml
+- id: chatgpt-to-memory
+  config:
+    exportRoot: D:\ChatGPT-Backups
+    workdir: D:\deepseek workspace
+    autoMerge: true
+    distill:
+      provider: deepseek-official
+      model: ''        # empty = first model of that provider
+      batchConvs: 20
+```
 
 ## Self-test
 
 ```powershell
 node --check index.js
-node smoke.mjs
+node smoke.mjs      # 19 checks
 ```
-
-## Compatibility
-
-- Verified against DSH `0.2.2-rc.1` (in progress).
-- Requires host-provided `@deepseek-ai/dsh-tools`; `playwright-core` becomes an optional dependency in M2.
 
 ## Known limits
 
-- M1 does not trigger/download exports (workspace scripts still do that, already proven end-to-end).
-- New messages inside old conversations are skipped in M1 (conservative).
+- Export/download needs `weekly.mjs` (shipped) plus Playwright and your Chrome login state; the plugin declares `playwright-core`.
+- Distillation quality depends on the model; low-confidence/private items follow the memory plugin's routing.
 - `.dat` attachments are not parsed.
 
 ## Version
 
-- **v0.1.0** (2026-11-11): M1 skeleton — scan, dedupe, dataset, report, config, status.
+- **v0.2.0** (2026-11-20): full pipeline inside the plugin (`import_run`), new `import_distill`, processed-conversation cursor.
+- **v0.1.0**: M1 scan/dedupe/dataset/config.
 
 ## Listing status
 
-To be submitted to awesome-dsh-plugin / dsh-plugin.org after release.
+- Pending maintainer merge: [awesome-dsh-plugin #17270](https://github.com/awesome-dsh-plugin/awesome-dsh-plugin/pull/17270)
 
 ## License
 

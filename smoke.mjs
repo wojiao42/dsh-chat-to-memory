@@ -22,15 +22,28 @@ async function check(name, fn) {
   }
 }
 
-// ── A) 静态检查：不联网、不执行命令 ──
+// ── A) 静态检查：无网络调用；只允许在 lib/export-run.mjs 里 spawn 自带脚本 ──
 const SRC = readFileSync(new URL('./index.js', import.meta.url), 'utf8');
-await check('源码里没有 fetch / XMLHttpRequest / child_process（不联网、不执行命令）', () => {
-  assert.ok(!/\bfetch\s*\(/.test(SRC), '出现 fetch(');
-  assert.ok(!/XMLHttpRequest/.test(SRC), '出现 XMLHttpRequest');
-  assert.ok(!/child_process/.test(SRC), '出现 child_process');
+const LIB_FILES = ['export-run', 'distill', 'merge'].map((n) => ({
+  name: `lib/${n}.mjs`,
+  text: readFileSync(new URL(`./lib/${n}.mjs`, import.meta.url), 'utf8'),
+}));
+await check('源码里没有 fetch / XMLHttpRequest（不联网）', () => {
+  const all = [{ name: 'index.js', text: SRC }, ...LIB_FILES];
+  for (const f of all) {
+    assert.ok(!/\bfetch\s*\(/.test(f.text), `${f.name} 出现 fetch(`);
+    assert.ok(!/XMLHttpRequest/.test(f.text), `${f.name} 出现 XMLHttpRequest`);
+  }
+});
+await check('child_process 只出现在 lib/export-run.mjs（只跑自带 weekly.mjs）', () => {
+  assert.ok(!/child_process/.test(SRC), 'index.js 不应直接 spawn');
+  const users = LIB_FILES.filter((f) => /child_process/.test(f.text)).map((f) => f.name);
+  assert.deepEqual(users, ['lib/export-run.mjs']);
+  assert.ok(!/spawnSync\([^)]*\b(?:cmd|powershell|pwsh)\b/i.test(SRC), '出现 shell 调用');
 });
 await check('源码里没有删除/改名/改权限操作（只读数据）', () => {
-  assert.ok(!/\b(rmSync|unlinkSync|renameSync|chmodSync)\s*\(/.test(SRC), '出现破坏性文件操作');
+  const all = [{ name: 'index.js', text: SRC }, ...LIB_FILES];
+  for (const f of all) assert.ok(!/\b(rmSync|unlinkSync|renameSync|chmodSync)\s*\(/.test(f.text), `${f.name} 出现破坏性文件操作`);
 });
 
 const mod = await import('./index.js');
@@ -87,13 +100,14 @@ const registered = [];
 const fakeCtx = { tools: { register: (t) => registered.push(t) } };
 const exec = { agent: { session: { header: { cwd } } } };
 
-await check('apply() 注册 5 个工具', () => {
+await check('apply() 注册 6 个工具', () => {
   mod.apply(fakeCtx, { exportRoot });
   assert.deepEqual(registered.map((t) => t.name), [
     'import_status',
     'import_configure',
     'import_scan',
     'import_preview',
+    'import_distill',
     'import_run',
   ]);
 });
@@ -154,11 +168,75 @@ await check('import_preview 返回预览与蒸馏要求', async () => {
   assert.ok(render.includes('禁止职业推断'), '预览里缺蒸馏硬规则');
 });
 
-await check('import_run 是明确的 M1 占位（不假装已实现）', async () => {
-  const r = await tool('import_run').execute({}, exec);
-  assert.equal(r.ok, false);
-  assert.equal(r.stage, 'not-implemented');
-  assert.ok(r.message.includes('M1'));
+// ── v0.2.0：完整链路组件（蒸馏 / 合并 / 导出输出解析）──
+await check('extractJson 能处理裸 JSON 与 ```json 包裹', async () => {
+  const { extractJson } = await import('./lib/distill.mjs');
+  assert.deepEqual(extractJson('{"items":[]}'), { items: [] });
+  assert.deepEqual(extractJson('```json\n{"items":[1]}\n```'), { items: [1] });
+  assert.equal(extractJson('no json here'), null);
+});
+
+await check('distillDataset 用 ctx.llm 产出候选文件', async () => {
+  const { distillDataset } = await import('./lib/distill.mjs');
+  const fakeCtx = {
+    llm: {
+      listModels: async () => [{ id: 'fake-model' }],
+      stream: async function* () {
+        const payload = {
+          version: 1,
+          source: 'chatgpt-export',
+          exportDate: '2026-11-16',
+          items: [
+            { type: 'fact', category: '硬件', text: '测试蒸馏事实', confidence: 'high', sensitivity: 'normal', date: '2026-11-16', title: '新会话', convId: 'conv-new', quotes: ['我新买了一个东西'] },
+          ],
+        };
+        yield { type: 'text-delta', text: JSON.stringify(payload) };
+        yield { type: 'finish', kind: 'completed' };
+      },
+    },
+  };
+  const dsPath = join(cwd, 'profile', 'import-runs', 'test-distill', 'dataset.json');
+  mkdirSync(join(cwd, 'profile', 'import-runs', 'test-distill'), { recursive: true });
+  writeFileSync(
+    dsPath,
+    JSON.stringify({
+      conversations: [
+        { convId: 'conv-new', title: '新会话', updatedAt: 1794000000000, messages: [{ role: 'user', at: null, text: '我新买了一个东西' }] },
+      ],
+    }),
+    'utf8',
+  );
+  const r = await distillDataset(fakeCtx, dsPath, { workdir: cwd, provider: 'fake', batchConvs: 10 });
+  assert.equal(r.itemCount, 1);
+  assert.ok(existsSync(r.file), '候选文件未写');
+  const cand = JSON.parse(readFileSync(r.file, 'utf8'));
+  assert.equal(cand.items[0].text, '测试蒸馏事实');
+});
+
+await check('mergeCandidates：记忆插件不在时返回 memory-plugin-missing（不抛）', async () => {
+  const { mergeCandidates } = await import('./lib/merge.mjs');
+  const old = process.env.DSH_PROFILE_DIR;
+  process.env.DSH_PROFILE_DIR = join(cwd, 'profile', 'not-installed');
+  try {
+    const r = await mergeCandidates(cwd, join(cwd, 'profile', 'inbox', 'candidates-2099-01-01-plugin.json'));
+    assert.equal(r.ok, false);
+    assert.equal(r.reason, 'memory-plugin-missing');
+  } finally {
+    if (old === undefined) delete process.env.DSH_PROFILE_DIR;
+    else process.env.DSH_PROFILE_DIR = old;
+  }
+});
+
+await check('parseLastJson 能从 weekly 输出里取最后一个 JSON', async () => {
+  const { parseLastJson } = await import('./lib/export-run.mjs');
+  const out = '[weekly] 查 Gmail…\n{"stage":"skip","ok":true}\n';
+  assert.deepEqual(parseLastJson(out), { stage: 'skip', ok: true });
+});
+
+await check('import_run 在非 done 阶段不蒸馏（render 走窗口分支）', async () => {
+  const r = { ok: true, stage: 'waiting-mail', actions: ['还没有就绪邮件'] };
+  const render = tool('import_run').output.render({}, r).map((b) => b.text).join('\n');
+  assert.ok(render.includes('本次窗口不导入'), '未走非 done 分支');
 });
 
 // ── D) 每个工具都有 render / schema 可校验 ──

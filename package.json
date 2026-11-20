@@ -1,8 +1,8 @@
 {
   "name": "dsh-chatgpt-to-memory",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": false,
-  "description": "Distills your official ChatGPT data export into durable memory candidates for DeepSeek Harness: downloads the export (with re-auth via Gmail code), dedupes against previous imports, and writes candidate facts / interests / viewpoints under profile/inbox for the dsh-long-term-memory plugin to merge. Never writes memory files itself; never uploads anything.",
+  "description": "Complete ChatGPT export-to-memory pipeline for DeepSeek Harness: triggers the official export, downloads and unzips it, dedupes conversations, distills durable facts/interests/viewpoints with the Host LLM, and merges them through dsh-long-term-memory.",
   "type": "module",
   "license": "MIT",
   "keywords": [
@@ -35,5 +35,8 @@
     "bundle": {
       "patch": "./cordis.patch.yml"
     }
+  },
+  "dependencies": {
+    "playwright-core": "^1.65.0"
   }
 }
