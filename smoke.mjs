@@ -50,7 +50,7 @@ const mod = await import('./index.js');
 
 await check('导出 name / inject', () => {
   assert.equal(mod.name, 'chatgpt-to-memory');
-  assert.deepEqual(mod.inject, ['tools']);
+  assert.deepEqual(mod.inject, ['tools', 'llm']);
 });
 
 await check('默认配置包含 scope / sensitivity / writeMode / distill', () => {

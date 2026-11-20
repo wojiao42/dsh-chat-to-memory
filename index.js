@@ -32,7 +32,7 @@ import { mergeCandidates } from './lib/merge.mjs';
 const PLUGIN_DIR = dirname(fileURLToPath(import.meta.url));
 
 export const name = 'chatgpt-to-memory';
-export const inject = ['tools'];
+export const inject = ['tools', 'llm'];
 
 const DEFAULT_EXPORT_ROOT = 'D:\\ChatGPT-Backups';
 const DEFAULT_CONFIG_FILE = 'distill-config.json';
@@ -502,11 +502,11 @@ export function apply(ctx, config = {}) {
             ok: exp.ok !== false,
             stage: exp.stage || 'unknown',
             actions: exp.actions || [],
-            error: exp.error,
+            ...(exp.error ? { error: String(exp.error) } : {}),
           };
         }
         const s = scan(cwd, { exportRoot, write: true });
-        if (!s.ok) return { ok: false, stage: s.reason || 'scan-failed', error: s.message };
+        if (!s.ok) return { ok: false, stage: s.reason || 'scan-failed', error: String(s.message || '扫描失败') };
         const exportInfo = {
           zipName: (s.exportDir || '').split(/[\\/]/).pop() ? `chatgpt-export-${s.exportDate}.zip` : '?',
           sizeMB: '',
