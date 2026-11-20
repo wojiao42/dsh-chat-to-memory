@@ -85,6 +85,7 @@ node smoke.mjs
 
 ## Version
 
+- **v0.2.1** (2026-11-20): fixes the LLM injection declaration (inject now includes llm) so distillation works in the host; documentation rewritten in formal bilingual form.
 - **v0.2.0** (2026-11-20): complete pipeline inside the plugin; new `import_distill` and processed-conversation cursor.
 - **v0.1.0**: scan, dedupe, dataset, and configuration.
 
