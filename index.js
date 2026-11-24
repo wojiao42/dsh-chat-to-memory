@@ -30,8 +30,23 @@ import { runWeekly } from './lib/export-run.mjs';
 import { distillDataset } from './lib/distill.mjs';
 import { mergeCandidates } from './lib/merge.mjs';
 import { parseLastJson } from './lib/export-run.mjs';
+import { appendCorpus, hashText } from './lib/turn-corpus.mjs';
 
 const PLUGIN_DIR = dirname(fileURLToPath(import.meta.url));
+
+/** 把已成功导入的数据集里的用户原话哈希追加进语料（下次按原话判重，不再靠日期/会话 id） */
+function markDatasetImported(cwd, datasetPath, corpusFile) {
+  try {
+    const ds = JSON.parse(readFileSync(datasetPath, 'utf8'));
+    const hashes = new Set();
+    for (const c of ds.conversations || []) {
+      for (const m of c.messages || []) if (m.role === 'user') hashes.add(hashText(m.text));
+    }
+    return appendCorpus(corpusFile, hashes);
+  } catch {
+    return 0;
+  }
+}
 
 export const name = 'chat-to-memory';
 export const inject = ['tools', 'llm'];
@@ -488,7 +503,8 @@ export function apply(ctx, config = {}) {
               `DeepSeek 导入完成：\n下载：${v.deepseek?.zipBytes ? `${(v.deepseek.zipBytes / 1048576).toFixed(1)} MB` : '?'} · 会话 ${v.deepseek?.sessions ?? '?'}（含用户发言 ${v.deepseek?.conversations ?? '?'} 个）\n` +
                 `新增：${v.deepseek?.newConversations ?? '?'} 会话 / ${v.deepseek?.newUserTurns ?? '?'} 原话\n` +
                 `蒸馏：${v.distill?.itemCount ?? '?'} 条候选（跳过 ${v.distill?.skippedBatches ?? 0} 批）\n` +
-                `合并：memory ${w.memory ?? '?'} · interests ${w.interests ?? '?'} · profile ${w.profile ?? '?'} · 待审 ${v.merge?.pending ?? '?'} · 重复 ${v.merge?.duplicates ?? '?'}`,
+                `合并：memory ${w.memory ?? '?'} · interests ${w.interests ?? '?'} · profile ${w.profile ?? '?'} · 待审 ${v.merge?.pending ?? '?'} · 重复 ${v.merge?.duplicates ?? '?'}\n` +
+                `去重：新标记 ${v.markedTurns ?? 0} 条原话（下次按原话哈希判重）`,
             );
           }
           if (v.stage === 'no-new') return textOut('DeepSeek 本次无新会话（已跳过蒸馏）。');
@@ -523,12 +539,15 @@ export function apply(ctx, config = {}) {
         if (!parsed.newConversations) return { ...parsed, stage: 'no-new' };
         const d = await distillDataset(ctx, parsed.datasetPath, { workdir: cwd, exportDate: parsed.datasetPath, ...distillConfig });
         const merged = autoMerge ? await mergeCandidates(cwd, d.file) : null;
+        const corpusFile = parsed.corpusFile || join(cwd, 'profile', 'import-runs', 'deepseek-imported-turns.jsonl');
+        const markedTurns = merged && merged.ok !== false ? markDatasetImported(cwd, parsed.datasetPath, corpusFile) : 0;
         return {
           ok: true,
           stage: 'imported',
           deepseek: parsed,
           distill: { itemCount: d.itemCount, batches: d.batches, skippedBatches: d.skippedBatches },
           merge: merged,
+          markedTurns,
           candidates: d.file,
         };
       },

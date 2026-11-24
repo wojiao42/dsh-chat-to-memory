@@ -15,7 +15,7 @@
 1. **获取导出**
    - ChatGPT：调用官方导出流程；遇到近期登录校验时，自动读取注册邮箱验证码并重新认证；等待就绪邮件后下载、解压、校验。
    - DeepSeek：在专用 Chrome 登录态内调用官方导出接口（`export_all` / `download_export_history`），等待生成后下载 ZIP、解压。
-2. **去重**：按会话 ID 与消息文本比对；已处理记录分来源保存（`profile/import-runs/processed-conversations.json`、`processed-deepseek.json`）。
+2. **去重**：DeepSeek 源按**用户原话哈希**判重（`profile/import-runs/deepseek-imported-turns.jsonl`）——只导入没蒸馏过的原话，同一会话里后来新增的原话也会被导入；ChatGPT 源按会话 ID 与消息文本比对。
 3. **蒸馏**：通过宿主 LLM 服务分批提取事实、兴趣与观点；低置信与敏感内容按敏感度分级。
 4. **合并**：调用 `dsh-long-term-memory` 的 `memory_import_candidates`，按类型与敏感度写入 `MEMORY.md`、`INTERESTS.md`、`USER-PROFILE.md` 或待审队列。
 
@@ -92,6 +92,7 @@ node smoke.mjs
 
 ## 版本
 
+- **v1.0.1**（2026-11-24）：DeepSeek 源改为**原话级去重**（不再按日期/会话 id 猜测），新增 `turn-corpus`、历史语料种子与离线建集脚本。
 - **v1.0.0**（2026-11-24）：统一 ChatGPT 与 DeepSeek 两个来源；插件更名为 `dsh-chat-to-memory`；新增 `import_deepseek` 与 DeepSeek 解析器。
 - **v0.2.1**：修复 LLM 注入声明；文档正式化。
 - **v0.2.0**：完整链路进入插件。

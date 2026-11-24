@@ -268,6 +268,28 @@ await check('parseDeepseekDir 能把 DeepSeek 导出转成统一数据集', asyn
   assert.equal(r.userTurns, 1);
 });
 
+await check('turn-corpus 按原话哈希判重（旧会话新增的原话也能导入）', async () => {
+  const { filterByCorpus, hashText } = await import('./lib/turn-corpus.mjs');
+  const corpus = new Set([hashText('已经导入过的一句话')]);
+  const convs = [
+    { convId: 'old', title: '旧会话', messages: [
+      { role: 'user', text: '已经导入过的一句话' },
+      { role: 'assistant', text: '回复' },
+      { role: 'user', text: '这是后来新增的一句' },
+      { role: 'assistant', text: '回复2' },
+    ] },
+    { convId: 'dup', title: '全重复', messages: [{ role: 'user', text: '已经导入过的一句话' }] },
+  ];
+  const r = filterByCorpus(convs, corpus);
+  assert.equal(r.conversations.length, 1, '应只保留含新原话的会话');
+  assert.equal(r.conversations[0].convId, 'old');
+  const texts = r.conversations[0].messages.map((m) => m.text);
+  assert.ok(texts.includes('这是后来新增的一句'), '新原话应保留');
+  assert.ok(!texts.includes('已经导入过的一句话'), '旧原话应被过滤');
+  assert.equal(r.skippedConversations, 1);
+  assert.equal(r.newTurns, 1);
+});
+
 // ── D) 每个工具都有 render / schema 可校验 ──
 await check('每个工具都有 output.render 与 schema', () => {
   for (const t of registered) {
