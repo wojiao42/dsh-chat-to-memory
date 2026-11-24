@@ -457,7 +457,10 @@ export function apply(ctx, config = {}) {
         }
         const r = await distillDataset(ctx, datasetPath, { workdir: cwd, ...distillConfig });
         const merged = autoMerge ? await mergeCandidates(cwd, r.file) : null;
-        return { ...r, merged };
+        // 数据集路径里带来源标记：xxx-deepseek 视为 DeepSeek，否则按 ChatGPT
+        const source = /-deepseek/.test(datasetPath) ? 'deepseek' : 'chatgpt';
+        const recorded = merged && merged.ok !== false ? recordDatasetRun(cwd, source, datasetPath) : { added: 0 };
+        return { ...r, merged, ledgerAdded: recorded.added, source };
       },
     }),
   );
