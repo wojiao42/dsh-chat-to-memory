@@ -23,18 +23,28 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { spawnSync } from 'node:child_process';
-import { dirname, join, resolve } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { defineTool } from '@deepseek-ai/dsh-tools';
 import { runWeekly } from './lib/export-run.mjs';
 import { distillDataset } from './lib/distill.mjs';
 import { mergeCandidates } from './lib/merge.mjs';
 import { parseLastJson } from './lib/export-run.mjs';
-import { appendCorpus, hashText } from './lib/turn-corpus.mjs';
+import { filterByLedger, loadLedger, recordRun } from './lib/ledger.mjs';
 
 const PLUGIN_DIR = dirname(fileURLToPath(import.meta.url));
 
 /** 把已成功导入的数据集里的用户原话哈希追加进语料（下次按原话判重，不再靠日期/会话 id） */
+function recordDatasetRun(cwd, source, datasetPath) {
+  try {
+    const ds = JSON.parse(readFileSync(datasetPath, 'utf8'));
+    const runId = basename(dirname(datasetPath));
+    return recordRun(cwd, source, { runId, datasetPath, conversations: ds.conversations || [] });
+  } catch {
+    return { added: 0 };
+  }
+}
+
 function markDatasetImported(cwd, datasetPath, corpusFile) {
   try {
     const ds = JSON.parse(readFileSync(datasetPath, 'utf8'));
@@ -211,46 +221,18 @@ export function scan(cwd, opts = {}) {
     };
   }
   const conversations = readConversations(latest.dir);
-  const processed = loadProcessed(paths);
-  // 已处理会话表（插件自己记的游标，避免重复导入）：profile/import-runs/processed-conversations.json
-  const extraFile = join(paths.runs, 'processed-conversations.json');
-  let extra = new Set();
-  try {
-    extra = new Set(JSON.parse(readFileSync(extraFile, 'utf8')));
-  } catch {
-    // 没有游标文件就当没有
-  }
-
-  const picked = [];
-  let userTurns = 0;
-  let alreadyProcessed = 0;
-  const seenTexts = new Set();
-  for (const conv of conversations.slice(0, MAX_CONVERSATIONS_PER_SCAN)) {
-    const convId = conv.conversation_id || conv.id || '';
-    const msgs = userMessages(conv);
-    const userMsgs = msgs.filter((m) => m.role === 'user');
-    userTurns += userMsgs.length;
-    if (processed.convIds.has(convId) || extra.has(convId)) {
-      alreadyProcessed += userMsgs.length;
-      continue; // 旧会话整段跳过
-    }
-    const fresh = userMsgs.filter((m) => {
-      const n = normalize(m.text);
-      if (!n || seenTexts.has(n) || processed.texts.has(n)) return false;
-      seenTexts.add(n);
-      return true;
-    });
-    if (!fresh.length) {
-      alreadyProcessed += userMsgs.length;
-      continue;
-    }
-    picked.push({
-      convId,
-      title: conv.title || '(无标题)',
-      updatedAt: conv.update_time || conv.create_time || null,
-      messages: msgs,
-    });
-  }
+  // 原话级去重：以分来源账本为准；老会话后来新增的问答也会被识别
+  const ledger = loadLedger(cwd, 'chatgpt');
+  const allConvs = conversations.slice(0, MAX_CONVERSATIONS_PER_SCAN).map((conv) => ({
+    convId: conv.conversation_id || conv.id || '',
+    title: conv.title || '(无标题)',
+    updatedAt: conv.update_time || conv.create_time || null,
+    messages: userMessages(conv),
+  }));
+  const userTurns = allConvs.reduce((a, c) => a + c.messages.filter((m) => m.role === 'user').length, 0);
+  const filtered = filterByLedger(allConvs, ledger);
+  const picked = filtered.conversations;
+  const alreadyProcessed = userTurns - filtered.newTurns;
 
   const stamp = new Date().toISOString().replace(/[-:T]/g, '').slice(0, 14);
   const runDir = join(paths.runs, stamp);
@@ -281,12 +263,7 @@ export function scan(cwd, opts = {}) {
       )}\n`,
       'utf8',
     );
-    // 记录已处理会话（下次不再重复蒸馏）
-    if (picked.length) {
-      mkdirSync(paths.runs, { recursive: true });
-      const nextExtra = new Set([...extra, ...picked.map((c) => c.convId)]);
-      writeFileSync(extraFile, JSON.stringify([...nextExtra], null, 1), 'utf8');
-    }
+    // 账本在「蒸馏 + 合并成功」后才写（见 import_run / import_deepseek）
   }
   return stats;
 }
@@ -539,8 +516,8 @@ export function apply(ctx, config = {}) {
         if (!parsed.newConversations) return { ...parsed, stage: 'no-new' };
         const d = await distillDataset(ctx, parsed.datasetPath, { workdir: cwd, exportDate: parsed.datasetPath, ...distillConfig });
         const merged = autoMerge ? await mergeCandidates(cwd, d.file) : null;
-        const corpusFile = parsed.corpusFile || join(cwd, 'profile', 'import-runs', 'deepseek-imported-turns.jsonl');
-        const markedTurns = merged && merged.ok !== false ? markDatasetImported(cwd, parsed.datasetPath, corpusFile) : 0;
+        const recorded = merged && merged.ok !== false ? recordDatasetRun(cwd, 'deepseek', parsed.datasetPath) : { added: 0 };
+        const markedTurns = recorded.added;
         return {
           ok: true,
           stage: 'imported',
@@ -605,6 +582,7 @@ export function apply(ctx, config = {}) {
         }
         const d = await distillDataset(ctx, s.datasetPath, { workdir: cwd, exportDate: s.exportDate, ...distillConfig });
         const merged = autoMerge ? await mergeCandidates(cwd, d.file) : null;
+        const recorded = merged && merged.ok !== false ? recordDatasetRun(cwd, 'chatgpt', s.datasetPath) : { added: 0 };
         return {
           ok: true,
           stage: 'imported',
@@ -612,6 +590,7 @@ export function apply(ctx, config = {}) {
           scan: s,
           distill: { itemCount: d.itemCount, batches: d.batches, skippedBatches: d.skippedBatches },
           merge: merged,
+          markedTurns: recorded.added,
           candidates: d.file,
         };
       },

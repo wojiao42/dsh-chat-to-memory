@@ -15,7 +15,7 @@ Both sources share one post-processing chain:
 1. **Obtain the export**
    - ChatGPT: invokes the official export flow; when a recent-login check appears it reads the mailbox verification code and re-authenticates; waits for the ready email, then downloads, extracts and verifies.
    - DeepSeek: calls the official export endpoints (`export_all` / `download_export_history`) inside a dedicated Chrome login state, waits for generation, downloads and extracts the ZIP.
-2. **Deduplication**: the DeepSeek source deduplicates by **user-message hashes** (`profile/import-runs/deepseek-imported-turns.jsonl`) — only messages that were never distilled are imported, including newly added messages inside existing conversations; the ChatGPT source compares conversation IDs and message text.
+2. **Deduplication and tracing**: both sources share a **message-level ledger** (`profile/imports/<source>/ledger.jsonl`) — only user messages missing from the ledger are imported; questions added later to an existing conversation are detected and only the new part is imported. Each run writes a summary to `profile/imports/<source>/runs/<runId>.json`.
 3. **Distillation**: extracts facts, interests and viewpoints in batches through the host LLM service; sensitive and low-confidence items are classified by sensitivity.
 4. **Merge**: calls `memory_import_candidates` in `dsh-long-term-memory`, which routes items into `MEMORY.md`, `INTERESTS.md`, `USER-PROFILE.md`, or the pending queue.
 
@@ -55,6 +55,17 @@ When there is no new export or no new conversation, the pipeline skips automatic
 - `distill.batchConvs`: conversations per batch.
 - `deepseek.profile`: directory of the dedicated Chrome login state for DeepSeek.
 
+## Ledger and tracing
+
+- Ledgers are kept per source: `profile/imports/chatgpt/ledger.jsonl` and `profile/imports/deepseek/ledger.jsonl`; each line records one imported user message (conversation ID, title, original timestamp, hash, import time, runId).
+- Entries are appended only after distillation and merge succeed, so failures never swallow data.
+- Trace a conversation import history:
+
+```powershell
+node lib/trace-ledger.mjs --source deepseek --conv <conversation-id>
+node lib/trace-ledger.mjs --source chatgpt --runs
+```
+
 ## Security and scope
 
 - Accesses only local data: the export directories, the workspace `profile/`, and the dedicated browser login directories.
@@ -92,6 +103,7 @@ node smoke.mjs
 
 ## Version
 
+- **v1.1.0** (2026-11-25): both sources share a message-level ledger (`profile/imports/<source>/`) and a `trace-ledger` tool; new questions in existing ChatGPT conversations are imported without re-importing the whole conversation.
 - **v1.0.1** (2026-11-24): DeepSeek source deduplicates at the message level (no date/conversation-ID guessing); adds `turn-corpus`, corpus seeding and an offline dataset builder.
 - **v1.0.0** (2026-11-24): unifies ChatGPT and DeepSeek sources; renamed to `dsh-chat-to-memory`; adds `import_deepseek` and the DeepSeek parser.
 - **v0.2.1**: LLM injection fix; formal documentation.

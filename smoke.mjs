@@ -79,6 +79,14 @@ writeFileSync(
   'utf8',
 );
 
+// 分来源账本：旧会话的那条原话已导入（扫描时应被原话级去重跳过）
+mkdirSync(join(cwd, 'profile', 'imports', 'chatgpt'), { recursive: true });
+writeFileSync(
+  join(cwd, 'profile', 'imports', 'chatgpt', 'ledger.jsonl'),
+  `${JSON.stringify({ src: 'chatgpt', convId: 'conv-old', title: '旧会话', at: '2026-01-01T00:00:00Z', h: (await import('./lib/ledger.mjs')).hashText('老的已处理消息'), text: '老的已处理消息', runId: 'seed', importedAt: '2026-01-02T00:00:00Z' })}\n`,
+  'utf8',
+);
+
 const mapping = (texts) => {
   const m = {};
   for (const [i, t] of texts.entries()) {
@@ -288,6 +296,41 @@ await check('turn-corpus 按原话哈希判重（旧会话新增的原话也能�
   assert.ok(!texts.includes('已经导入过的一句话'), '旧原话应被过滤');
   assert.equal(r.skippedConversations, 1);
   assert.equal(r.newTurns, 1);
+});
+
+await check('ledger：分来源账本可增量、可回溯（老会话新增原话只导新的）', async () => {
+  const { filterByLedger, recordRun, loadLedger, traceLedger } = await import('./lib/ledger.mjs');
+  const cwd2 = join(cwd, 'profile', 'ledger-test');
+  const convs = [
+    { convId: 'c-old', title: '老会话', messages: [
+      { role: 'user', at: '2026-01-01T00:00:00Z', text: '第一句话' },
+      { role: 'assistant', at: '2026-01-01T00:00:01Z', text: '回复一' },
+    ] },
+  ];
+  const r1 = filterByLedger(convs, loadLedger(cwd2, 'chatgpt'));
+  assert.equal(r1.newTurns, 1, '首次应有 1 条新原话');
+  recordRun(cwd2, 'chatgpt', { runId: 'run-1', datasetPath: join(cwd2, 'profile', 'import-runs', 'run-1', 'dataset.json'), conversations: r1.conversations });
+  assert.equal(loadLedger(cwd2, 'chatgpt').size, 1);
+
+  // 同一会话后来又有一句新原话
+  convs[0].messages.push(
+    { role: 'user', at: '2026-11-20T00:00:00Z', text: '后来新增的一句话' },
+    { role: 'assistant', at: '2026-11-20T00:00:01Z', text: '回复二' },
+  );
+  const r2 = filterByLedger(convs, loadLedger(cwd2, 'chatgpt'));
+  assert.equal(r2.newTurns, 1, '只应识别到新增的那一句');
+  assert.equal(r2.conversations.length, 1, '老会话应因新原话被保留');
+  const texts = r2.conversations[0].messages.map((m) => m.text);
+  assert.deepEqual(texts, ['后来新增的一句话', '回复二'], '应只含新原话+其后的助手回复');
+
+  recordRun(cwd2, 'chatgpt', { runId: 'run-2', datasetPath: 'x', conversations: r2.conversations });
+  assert.equal(loadLedger(cwd2, 'chatgpt').size, 2);
+  const t = traceLedger(cwd2, 'chatgpt', { convId: 'c-old' });
+  assert.equal(t.total, 2, '回溯应有 2 条');
+  assert.equal(t.items[1].runId, 'run-2');
+  // 再扫一遍应无新增（幂等）
+  const r3 = filterByLedger(convs, loadLedger(cwd2, 'chatgpt'));
+  assert.equal(r3.newTurns, 0);
 });
 
 // ── D) 每个工具都有 render / schema 可校验 ──
