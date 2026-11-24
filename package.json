@@ -1,8 +1,8 @@
 {
-  "name": "dsh-chatgpt-to-memory",
-  "version": "0.2.1",
+  "name": "dsh-chat-to-memory",
+  "version": "1.0.0",
   "private": false,
-  "description": "Complete ChatGPT export-to-memory pipeline for DeepSeek Harness: triggers the official export with automatic email-code re-authentication, transfers and verifies the download, deduplicates processed conversations, distills durable facts through the host LLM service, and merges them via dsh-long-term-memory. Never writes memory files directly.",
+  "description": "Unified chat-export-to-memory pipeline for DeepSeek Harness: imports official ChatGPT (email-code re-authentication, download and verification) and DeepSeek website exports, deduplicates conversations, distills durable facts through the host LLM service, and merges them via dsh-long-term-memory. Never writes memory files directly.",
   "type": "module",
   "license": "MIT",
   "keywords": [

@@ -35,11 +35,11 @@ await check('源码里没有 fetch / XMLHttpRequest（不联网）', () => {
     assert.ok(!/XMLHttpRequest/.test(f.text), `${f.name} 出现 XMLHttpRequest`);
   }
 });
-await check('child_process 只出现在 lib/export-run.mjs（只跑自带 weekly.mjs）', () => {
-  assert.ok(!/child_process/.test(SRC), 'index.js 不应直接 spawn');
-  const users = LIB_FILES.filter((f) => /child_process/.test(f.text)).map((f) => f.name);
-  assert.deepEqual(users, ['lib/export-run.mjs']);
-  assert.ok(!/spawnSync\([^)]*\b(?:cmd|powershell|pwsh)\b/i.test(SRC), '出现 shell 调用');
+await check('child_process 只用于跑自带脚本（不跑 shell/外部命令）', () => {
+  const allowed = ['index.js', 'lib/export-run.mjs'];
+  const users = [{ name: 'index.js', text: SRC }, ...LIB_FILES].filter((f) => /child_process/.test(f.text)).map((f) => f.name);
+  for (const u of users) assert.ok(allowed.includes(u), `${u} 不应使用 child_process`);
+  assert.ok(!/spawnSync\([^)]*\b(?:cmd|powershell|pwsh)\b/i.test(SRC), 'index.js 出现 shell 调用');
 });
 await check('源码里没有删除/改名/改权限操作（只读数据）', () => {
   const all = [{ name: 'index.js', text: SRC }, ...LIB_FILES];
@@ -49,7 +49,7 @@ await check('源码里没有删除/改名/改权限操作（只读数据）', ()
 const mod = await import('./index.js');
 
 await check('导出 name / inject', () => {
-  assert.equal(mod.name, 'chatgpt-to-memory');
+  assert.equal(mod.name, 'chat-to-memory');
   assert.deepEqual(mod.inject, ['tools', 'llm']);
 });
 
@@ -100,7 +100,7 @@ const registered = [];
 const fakeCtx = { tools: { register: (t) => registered.push(t) } };
 const exec = { agent: { session: { header: { cwd } } } };
 
-await check('apply() 注册 6 个工具', () => {
+await check('apply() 注册 7 个工具', () => {
   mod.apply(fakeCtx, { exportRoot });
   assert.deepEqual(registered.map((t) => t.name), [
     'import_status',
@@ -108,6 +108,7 @@ await check('apply() 注册 6 个工具', () => {
     'import_scan',
     'import_preview',
     'import_distill',
+    'import_deepseek',
     'import_run',
   ]);
 });
@@ -237,6 +238,34 @@ await check('import_run 在非 done 阶段不蒸馏（render 走窗口分支）'
   const r = { ok: true, stage: 'waiting-mail', actions: ['还没有就绪邮件'] };
   const render = tool('import_run').output.render({}, r).map((b) => b.text).join('\n');
   assert.ok(render.includes('本次窗口不导入'), '未走非 done 分支');
+});
+
+await check('parseDeepseekDir 能把 DeepSeek 导出转成统一数据集', async () => {
+  const { parseDeepseekDir } = await import('./lib/deepseek-import.mjs');
+  const dir = join(cwd, 'profile', 'ds-fixture');
+  mkdirSync(join(dir, 'chat_sessions'), { recursive: true });
+  writeFileSync(join(dir, 'manifest.json'), JSON.stringify({ export_format_version: 3 }), 'utf8');
+  writeFileSync(join(dir, 'chat_session_index.json'), JSON.stringify([{ id: 'c1', title: '测试会话', updated_at: '2026-11-20T00:00:00Z' }]), 'utf8');
+  writeFileSync(
+    join(dir, 'chat_sessions', 'c1.json'),
+    JSON.stringify({
+      id: 'c1',
+      title: '测试会话',
+      inserted_at: '2026-11-19T00:00:00Z',
+      updated_at: '2026-11-20T00:00:00Z',
+      messages: [
+        { role: 'USER', inserted_at: '2026-11-19T00:00:00Z', fragments: [{ type: 'REQUEST', content: '我有一条 DeepSeek 测试发言' }] },
+        { role: 'ASSISTANT', inserted_at: '2026-11-19T00:00:01Z', fragments: [{ type: 'RESPONSE', content: '回答内容' }] },
+      ],
+    }),
+    'utf8',
+  );
+  const r = parseDeepseekDir(dir);
+  assert.equal(r.formatVersion, 3);
+  assert.equal(r.conversations.length, 1);
+  assert.equal(r.conversations[0].convId, 'c1');
+  assert.equal(r.conversations[0].messages[0].text, '我有一条 DeepSeek 测试发言');
+  assert.equal(r.userTurns, 1);
 });
 
 // ── D) 每个工具都有 render / schema 可校验 ──

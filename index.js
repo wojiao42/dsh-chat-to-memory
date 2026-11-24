@@ -22,16 +22,18 @@ import {
   statSync,
   writeFileSync,
 } from 'node:fs';
+import { spawnSync } from 'node:child_process';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { defineTool } from '@deepseek-ai/dsh-tools';
 import { runWeekly } from './lib/export-run.mjs';
 import { distillDataset } from './lib/distill.mjs';
 import { mergeCandidates } from './lib/merge.mjs';
+import { parseLastJson } from './lib/export-run.mjs';
 
 const PLUGIN_DIR = dirname(fileURLToPath(import.meta.url));
 
-export const name = 'chatgpt-to-memory';
+export const name = 'chat-to-memory';
 export const inject = ['tools', 'llm'];
 
 const DEFAULT_EXPORT_ROOT = 'D:\\ChatGPT-Backups';
@@ -301,7 +303,7 @@ export function listArtifacts(paths) {
 const textOut = (t) => [{ type: 'text', text: t }];
 
 export function apply(ctx, config = {}) {
-  if (!ctx.tools) throw new Error('chatgpt-to-memory: ctx.tools 不可用，工具未注册。');
+  if (!ctx.tools) throw new Error('chat-to-memory: ctx.tools 不可用，工具未注册。');
   const exportRoot = config.exportRoot || DEFAULT_EXPORT_ROOT;
   const workdir = config.workdir || 'D:\\deepseek workspace';
   const distillConfig = {
@@ -310,6 +312,8 @@ export function apply(ctx, config = {}) {
     batchConvs: Number(config.distill?.batchConvs) || 20,
   };
   const autoMerge = config.autoMerge !== false;
+  const deepseekProfile = config.deepseek?.profile || 'D:\\ChatGPT-Backups\\profile-deepseek';
+  const profileDir = process.env.DSH_PROFILE_DIR || 'D:\\DeepSeekHarness-1\\home\\profiles\\desktop';
   const pathsFor = (agent) => resolvePaths(agent?.session?.header?.cwd || config.cwd, exportRoot);
 
   ctx.tools.register(
@@ -462,6 +466,71 @@ export function apply(ctx, config = {}) {
         const r = await distillDataset(ctx, datasetPath, { workdir: cwd, ...distillConfig });
         const merged = autoMerge ? await mergeCandidates(cwd, r.file) : null;
         return { ...r, merged };
+      },
+    }),
+  );
+
+  ctx.tools.register(
+    defineTool({
+      name: 'import_deepseek',
+      description:
+        '导入 DeepSeek 网页导出：检查登录态 → 查/触发官方导出 → 等生成 → 下载解压 → 扫描去重 → LLM 蒸馏 → 合并记忆。没有新会话时自动跳过；登录态失效会提示先登录。',
+      parameters: {},
+      output: {
+        schema: { type: 'object', additionalProperties: true, properties: {} },
+        render: (_a, v) => {
+          if (v.stage === 'need-login') {
+            return textOut('DeepSeek 登录态失效：请先在专用浏览器窗口登录一次（可用 --show 打开窗口），登录后再调用 import_deepseek。');
+          }
+          if (v.stage === 'imported') {
+            const w = v.merge?.written || {};
+            return textOut(
+              `DeepSeek 导入完成：\n下载：${v.deepseek?.zipBytes ? `${(v.deepseek.zipBytes / 1048576).toFixed(1)} MB` : '?'} · 会话 ${v.deepseek?.sessions ?? '?'}（含用户发言 ${v.deepseek?.conversations ?? '?'} 个）\n` +
+                `新增：${v.deepseek?.newConversations ?? '?'} 会话 / ${v.deepseek?.newUserTurns ?? '?'} 原话\n` +
+                `蒸馏：${v.distill?.itemCount ?? '?'} 条候选（跳过 ${v.distill?.skippedBatches ?? 0} 批）\n` +
+                `合并：memory ${w.memory ?? '?'} · interests ${w.interests ?? '?'} · profile ${w.profile ?? '?'} · 待审 ${v.merge?.pending ?? '?'} · 重复 ${v.merge?.duplicates ?? '?'}`,
+            );
+          }
+          if (v.stage === 'no-new') return textOut('DeepSeek 本次无新会话（已跳过蒸馏）。');
+          if (v.stage === 'export-pending') return textOut(`DeepSeek 导出还没生成：${v.error || '稍后重试即可'}`);
+          if (v.error) return textOut(`DeepSeek 导入失败（${v.stage}）：${v.error}`);
+          return textOut(`DeepSeek 导入结束：${JSON.stringify(v).slice(0, 300)}`);
+        },
+      },
+      async execute(_args, exec) {
+        const cwd = exec?.agent?.session?.header?.cwd || workdir;
+        const script = join(PLUGIN_DIR, 'lib', 'deepseek-import.mjs');
+        const env = {
+          ...process.env,
+          NODE_PATH: [join(profileDir, 'node_modules'), 'D:\\deepseek workspace\\automation\\node_modules', join(PLUGIN_DIR, 'node_modules')].join(';'),
+        };
+        const r = spawnSync(process.execPath, [script, '--workdir', cwd, '--profile', deepseekProfile], {
+          cwd: PLUGIN_DIR,
+          env,
+          encoding: 'utf8',
+          timeout: 30 * 60 * 1000,
+          windowsHide: true,
+          maxBuffer: 32 * 1024 * 1024,
+        });
+        const parsed =
+          parseLastJson(`${r.stdout || ''}\n${r.stderr || ''}`) || {
+            ok: false,
+            stage: 'spawn-failed',
+            error: `deepseek-import.mjs 退出码 ${r.status}；输出尾部：${`${r.stdout || ''}${r.stderr || ''}`.slice(-500)}`,
+          };
+        if (parsed.stage === 'need-login') return { ...parsed };
+        if (!parsed.ok || parsed.stage !== 'done') return { ...parsed };
+        if (!parsed.newConversations) return { ...parsed, stage: 'no-new' };
+        const d = await distillDataset(ctx, parsed.datasetPath, { workdir: cwd, exportDate: parsed.datasetPath, ...distillConfig });
+        const merged = autoMerge ? await mergeCandidates(cwd, d.file) : null;
+        return {
+          ok: true,
+          stage: 'imported',
+          deepseek: parsed,
+          distill: { itemCount: d.itemCount, batches: d.batches, skippedBatches: d.skippedBatches },
+          merge: merged,
+          candidates: d.file,
+        };
       },
     }),
   );
