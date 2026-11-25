@@ -108,7 +108,7 @@ const registered = [];
 const fakeCtx = { tools: { register: (t) => registered.push(t) } };
 const exec = { agent: { session: { header: { cwd } } } };
 
-await check('apply() 注册 7 个工具', () => {
+await check('apply() 注册 8 个工具', () => {
   mod.apply(fakeCtx, { exportRoot });
   assert.deepEqual(registered.map((t) => t.name), [
     'import_status',
@@ -117,6 +117,7 @@ await check('apply() 注册 7 个工具', () => {
     'import_preview',
     'import_distill',
     'import_deepseek',
+    'trace_origin',
     'import_run',
   ]);
 });

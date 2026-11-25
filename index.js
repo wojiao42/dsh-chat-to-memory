@@ -30,7 +30,7 @@ import { runWeekly } from './lib/export-run.mjs';
 import { distillDataset } from './lib/distill.mjs';
 import { mergeCandidates } from './lib/merge.mjs';
 import { parseLastJson } from './lib/export-run.mjs';
-import { filterByLedger, loadLedger, recordRun } from './lib/ledger.mjs';
+import { filterByLedger, loadLedger, recordRun, traceLedger, SOURCES } from './lib/ledger.mjs';
 
 const PLUGIN_DIR = dirname(fileURLToPath(import.meta.url));
 
@@ -534,6 +534,43 @@ export function apply(ctx, config = {}) {
     }),
   );
 
+  ctx.tools.register(
+    defineTool({
+      name: 'trace_origin',
+      description:
+        '回溯原文：按关键词/会话 ID 在分来源账本里查找之前说过的原话（ChatGPT / DeepSeek / DSH 会话）。核对记忆摘要、引用具体事实前查证用。只读。',
+      parameters: {
+        query: { type: 'string', description: '关键词（与原文做包含匹配）' },
+        source: { type: 'string', enum: ['all', 'chatgpt', 'deepseek', 'dsh'], description: '默认 all' },
+        convId: { type: 'string', description: '可选：只看某个会话' },
+        limit: { type: 'number', description: '最多返回条数，默认 8' },
+      },
+      output: {
+        schema: { type: 'object', additionalProperties: true, properties: {} },
+        render: (_a, v) => {
+          if (!v.matches || !v.matches.length) return textOut('账本里没有匹配的原话（可能未导出/未同步）。');
+          const rows = v.matches.map((m) => '· [' + m.source + '] ' + (m.at || '时间未知') + ' · ' + (m.title || '(无标题)') + '\n  「' + m.text + '」\n  会话 ' + m.convId + ' · run ' + m.runId);
+          return textOut('匹配 ' + v.total + ' 条（显示 ' + v.matches.length + '）：\n' + rows.join('\n'));
+        },
+      },
+      async execute(args, exec) {
+        const cwd = exec?.agent?.session?.header?.cwd || workdir;
+        const q = String(args.query || '').trim();
+        const limit = Math.max(1, Math.min(50, Number(args.limit) || 8));
+        const sources = args.source && args.source !== 'all' ? [args.source] : SOURCES;
+        const matches = [];
+        let total = 0;
+        for (const src of sources) {
+          if (!['chatgpt', 'deepseek', 'dsh'].includes(src)) continue;
+          const r = traceLedger(cwd, src, { convId: args.convId || undefined, q: q || undefined, limit: 500 });
+          total += r.total;
+          for (const it of r.items) matches.push({ source: src, ...it });
+        }
+        matches.sort((a, b) => String(b.at || '').localeCompare(String(a.at || '')));
+        return { ok: true, total, matches: matches.slice(0, limit) };
+      },
+    }),
+  );
   ctx.tools.register(
     defineTool({
       name: 'import_run',
