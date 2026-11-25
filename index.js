@@ -554,17 +554,21 @@ export function apply(ctx, config = {}) {
         },
       },
       async execute(args, exec) {
-        const cwd = exec?.agent?.session?.header?.cwd || workdir;
         const q = String(args.query || '').trim();
         const limit = Math.max(1, Math.min(50, Number(args.limit) || 8));
         const sources = args.source && args.source !== 'all' ? [args.source] : SOURCES;
+        // 会话 cwd 与配置工作区都试（账本在工作区 profile 下）
+        const cwds = [...new Set([exec?.agent?.session?.header?.cwd, workdir, 'D:\\deepseek workspace'].filter(Boolean))];
         const matches = [];
         let total = 0;
-        for (const src of sources) {
-          if (!['chatgpt', 'deepseek', 'dsh'].includes(src)) continue;
-          const r = traceLedger(cwd, src, { convId: args.convId || undefined, q: q || undefined, limit: 500 });
-          total += r.total;
-          for (const it of r.items) matches.push({ source: src, ...it });
+        for (const cwd of cwds) {
+          for (const src of sources) {
+            if (!['chatgpt', 'deepseek', 'dsh'].includes(src)) continue;
+            const r = traceLedger(cwd, src, { convId: args.convId || undefined, q: q || undefined, limit: 500 });
+            total += r.total;
+            for (const it of r.items) matches.push({ source: src, ...it });
+          }
+          if (total > 0) break;
         }
         matches.sort((a, b) => String(b.at || '').localeCompare(String(a.at || '')));
         return { ok: true, total, matches: matches.slice(0, limit) };
