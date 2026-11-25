@@ -31,6 +31,7 @@ import { distillDataset } from './lib/distill.mjs';
 import { mergeCandidates } from './lib/merge.mjs';
 import { parseLastJson } from './lib/export-run.mjs';
 import { filterByLedger, loadLedger, recordRun, traceLedger, SOURCES } from './lib/ledger.mjs';
+import { lookupProvenance, recordProvenance } from './lib/provenance.mjs';
 
 const PLUGIN_DIR = dirname(fileURLToPath(import.meta.url));
 
@@ -460,6 +461,7 @@ export function apply(ctx, config = {}) {
         // 数据集路径里带来源标记：xxx-deepseek 视为 DeepSeek，否则按 ChatGPT
         const source = /-deepseek/.test(datasetPath) ? 'deepseek' : 'chatgpt';
         const recorded = merged && merged.ok !== false ? recordDatasetRun(cwd, source, datasetPath) : { added: 0 };
+        const prov = merged && merged.ok !== false ? recordProvenance(cwd, { source, datasetPath, candidatesFile: r.file, runId: basename(dirname(datasetPath)) }) : { added: 0 };
         return { ...r, merged, ledgerAdded: recorded.added, source };
       },
     }),
@@ -520,6 +522,7 @@ export function apply(ctx, config = {}) {
         const d = await distillDataset(ctx, parsed.datasetPath, { workdir: cwd, exportDate: parsed.datasetPath, ...distillConfig });
         const merged = autoMerge ? await mergeCandidates(cwd, d.file) : null;
         const recorded = merged && merged.ok !== false ? recordDatasetRun(cwd, 'deepseek', parsed.datasetPath) : { added: 0 };
+        const prov = merged && merged.ok !== false ? recordProvenance(cwd, { source: 'deepseek', datasetPath: parsed.datasetPath, candidatesFile: d.file, runId: basename(dirname(parsed.datasetPath)) }) : { added: 0 };
         const markedTurns = recorded.added;
         return {
           ok: true,
@@ -544,6 +547,7 @@ export function apply(ctx, config = {}) {
         source: { type: 'string', enum: ['all', 'chatgpt', 'deepseek', 'dsh'], description: '默认 all' },
         convId: { type: 'string', description: '可选：只看某个会话' },
         limit: { type: 'number', description: '最多返回条数，默认 8' },
+        memoryText: { type: 'string', description: '可选：记忆条目原文；提供时先按 provenance 精确定位来源会话' },
       },
       output: {
         schema: { type: 'object', additionalProperties: true, properties: {} },
@@ -557,6 +561,29 @@ export function apply(ctx, config = {}) {
         const q = String(args.query || '').trim();
         const limit = Math.max(1, Math.min(50, Number(args.limit) || 8));
         const sources = args.source && args.source !== 'all' ? [args.source] : SOURCES;
+        // 记忆条目 → provenance → 会话 → 原文（精确路径，不靠猜关键词）
+        if (args.memoryText) {
+          for (const cwd0 of [...new Set([exec?.agent?.session?.header?.cwd, workdir, 'D:\\deepseek workspace'].filter(Boolean))]) {
+            const hit = lookupProvenance(cwd0, String(args.memoryText));
+            if (!hit) continue;
+            const scanSources = hit.source ? [hit.source] : SOURCES;
+            const out = [];
+            for (const src of scanSources) {
+              const r = traceLedger(cwd0, src, { convId: hit.convId || undefined, limit: 500 });
+              for (const it of r.items) out.push({ source: src, ...it });
+            }
+            out.sort((a, b) => String(b.at || '').localeCompare(String(a.at || '')));
+            // 优先只返回候选 quotes 命中的原话；没有 quotes 再退回整会话
+            const qs = (hit.quotes || []).map((x) => String(x));
+            let matched = out;
+            if (qs.length) {
+              matched = out.filter((it) => qs.some((q) => String(it.text || '').includes(q) || q.includes(String(it.text || ''))));
+            }
+            if (!matched.length) matched = out;
+            return { ok: true, total: matched.length, provenance: hit, matches: matched.slice(0, limit), scope: qs.length ? 'quotes' : 'conversation' };
+          }
+          return { ok: true, total: 0, matches: [], note: 'provenance 里没有这条记忆的溯源信息（可能是更早的口述记忆）' };
+        }
         // 会话 cwd 与配置工作区都试（账本在工作区 profile 下）
         const cwds = [...new Set([exec?.agent?.session?.header?.cwd, workdir, 'D:\\deepseek workspace'].filter(Boolean))];
         const matches = [];
@@ -627,6 +654,7 @@ export function apply(ctx, config = {}) {
         const d = await distillDataset(ctx, s.datasetPath, { workdir: cwd, exportDate: s.exportDate, ...distillConfig });
         const merged = autoMerge ? await mergeCandidates(cwd, d.file) : null;
         const recorded = merged && merged.ok !== false ? recordDatasetRun(cwd, 'chatgpt', s.datasetPath) : { added: 0 };
+        const prov = merged && merged.ok !== false ? recordProvenance(cwd, { source: 'chatgpt', datasetPath: s.datasetPath, candidatesFile: d.file, runId: basename(dirname(s.datasetPath)) }) : { added: 0 };
         return {
           ok: true,
           stage: 'imported',
